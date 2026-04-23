@@ -597,19 +597,89 @@ func TestProcessMiniMaxResponse_StoresTrimmedContent(t *testing.T) {
 	}
 }
 
+// TestConvertThinkingToUserMessage_SignatureWithTrailingWhitespace verifies that when
+// MiniMax signs thinking content WITH trailing whitespace (as it appears in the JSON),
+// the signature heuristic correctly identifies it even without a hash file.
+// This is the bug that manifested in production: MiniMax's signature matches
+// SHA256("The user just said \"hi\" - a simple greeting. I should respond concisely.\n")
+// not SHA256(TrimSpace(thinking content)).
+func TestConvertThinkingToUserMessage_SignatureWithTrailingWhitespace(t *testing.T) {
+	oldBase := thinkStoreBase
+	defer func() { thinkStoreBase = oldBase }()
+	thinkStoreBase = "" // disable hash store, test signature path only
+
+	// Thinking content as it appears in Claude Code's persisted JSON — has trailing newline.
+	thinkingWithTrailingWS := "The user just said \"hi\" - a simple greeting. I should respond concisely.\n"
+
+	// Compute the signature MiniMax would have issued: SHA256 of the raw (untrimmed) content.
+	sig := sha256Hash(thinkingWithTrailingWS)
+
+	input := map[string]interface{}{
+		"model": "claude-sonnet-4-6",
+		"messages": []interface{}{
+			map[string]interface{}{
+				"role": "assistant",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type":      "thinking",
+						"thinking":  thinkingWithTrailingWS,
+						"signature": sig,
+					},
+					map[string]interface{}{
+						"type": "text",
+						"text": "Hi! How can I help you today?",
+					},
+				},
+			},
+		},
+	}
+	inputJSON, _ := json.Marshal(input)
+
+	result := convertThinkingToUserMessage(inputJSON)
+
+	var out map[string]interface{}
+	if err := json.Unmarshal(result, &out); err != nil {
+		t.Fatalf("result is not valid JSON: %v", err)
+	}
+
+	msgs := out["messages"].([]interface{})
+	content := msgs[0].(map[string]interface{})["content"].([]interface{})
+
+	// Thinking block must be removed; user block must be appended.
+	if len(content) != 2 {
+		t.Errorf("content length = %d; want 2 (text kept + user appended)", len(content))
+	}
+	if content[0].(map[string]interface{})["type"] != "text" {
+		t.Errorf("content[0].type = %v; want 'text'", content[0].(map[string]interface{})["type"])
+	}
+	userBlock := content[1].(map[string]interface{})
+	if userBlock["type"] != "text" {
+		t.Errorf("content[1].type = %v; want 'text' (signature heuristic converted it)", userBlock["type"])
+	}
+	// userContent uses TrimSpace(thinkingStr), not raw.
+	expectedContent := "previous assistant thought process: " + strings.TrimSpace(thinkingWithTrailingWS)
+	if userBlock["text"] != expectedContent {
+		t.Errorf("user block text = %q; want %q", userBlock["text"], expectedContent)
+	}
+}
+
+// TestConvertThinkingToUserMessage_TrailingWhitespaceMismatch verifies that when
+// the think store uses untrimmed content (matching the user's change to h=hashThinking(thinkingStr)),
+// but the stored hash does not match the incoming content, the thinking block is preserved
+// (not converted). This is the correct behavior: only exact hash matches trigger conversion.
 func TestConvertThinkingToUserMessage_TrailingWhitespaceMismatch(t *testing.T) {
 	oldBase := thinkStoreBase
 	defer func() { thinkStoreBase = oldBase }()
 	tmpDir := t.TempDir()
 	thinkStoreBase = tmpDir
 
-	// Think store has hash for TRIMMED content (as stored from MiniMax response).
-	thinkingTrimmed := "I should respond briefly."
-	h := sha256Hash(thinkingTrimmed)
-	os.WriteFile(filepath.Join(tmpDir, h), nil, 0644)
-
-	// Claude Code sends thinking content WITH trailing newline (as it was in MiniMax response JSON).
+	// Store hash for untrimmed content (as now stored by convertThinkingToUserMessage).
 	thinkingUntrimmed := "I should respond briefly.\n"
+	hUntrimmed := sha256Hash(thinkingUntrimmed)
+	os.WriteFile(filepath.Join(tmpDir, hUntrimmed), nil, 0644)
+
+	// Claude Code sends thinking content that does NOT match the stored hash.
+	thinkingMismatched := "I should respond briefly." // no trailing newline, hash differs
 
 	input := map[string]interface{}{
 		"messages": []interface{}{
@@ -618,7 +688,7 @@ func TestConvertThinkingToUserMessage_TrailingWhitespaceMismatch(t *testing.T) {
 				"content": []interface{}{
 					map[string]interface{}{
 						"type":     "thinking",
-						"thinking": thinkingUntrimmed, // has trailing newline
+						"thinking": thinkingMismatched, // no trailing newline — hash doesn't match stored
 					},
 					map[string]interface{}{
 						"type": "text",
@@ -638,23 +708,16 @@ func TestConvertThinkingToUserMessage_TrailingWhitespaceMismatch(t *testing.T) {
 	msgs := out["messages"].([]interface{})
 	content := msgs[0].(map[string]interface{})["content"].([]interface{})
 
-	// Thinking block should be converted despite whitespace mismatch.
+	// Thinking block must remain — hash mismatch means no conversion.
 	if len(content) != 2 {
-		t.Errorf("content length = %d; want 2 (thinking removed, user block appended)", len(content))
+		t.Errorf("content length = %d; want 2 (thinking preserved, text kept)", len(content))
 	}
-	if content[0].(map[string]interface{})["type"] != "text" {
-		t.Errorf("content[0].type = %v; want 'text'", content[0].(map[string]interface{})["type"])
+	if content[0].(map[string]interface{})["type"] != "thinking" {
+		t.Errorf("content[0].type = %v; want 'thinking' (preserved — no hash match)", content[0].(map[string]interface{})["type"])
 	}
-	if content[1].(map[string]interface{})["type"] != "text" {
-		t.Errorf("content[1].type = %v; want 'text' (converted despite trailing newline)", content[1].(map[string]interface{})["type"])
-	}
-	if content[1].(map[string]interface{})["text"] != "previous assistant thought process: "+strings.TrimSpace(thinkingUntrimmed) {
-		t.Errorf("user block text mismatch; got %q", content[1].(map[string]interface{})["text"])
-	}
-
-	// Hash file should be deleted.
-	if _, err := os.Stat(filepath.Join(tmpDir, h)); !os.IsNotExist(err) {
-		t.Errorf("hash file should be deleted after conversion")
+	// Hash file must still exist (not deleted — no match).
+	if _, err := os.Stat(filepath.Join(tmpDir, hUntrimmed)); os.IsNotExist(err) {
+		t.Errorf("hash file should NOT be deleted when no match occurs")
 	}
 }
 

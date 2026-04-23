@@ -69,7 +69,6 @@ func main() {
 		}
 
 		target, raw := inspect(raw)
-
 		rewritten, err := json.Marshal(raw)
 		if err != nil {
 			http.Error(w, "failed to marshal body", http.StatusInternalServerError)
@@ -430,7 +429,7 @@ func convertThinkingToUserMessage(body []byte) []byte {
 			if trimmed == "" {
 				continue
 			}
-			h := hashThinking(trimmed)
+			h := hashThinking(thinkingStr)
 			sig, _ := blockMap["signature"].(string)
 
 			isMiniMaxBySig := sig != "" && sig == h
