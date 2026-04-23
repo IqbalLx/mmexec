@@ -5,3 +5,5 @@ mmexec.pid
 logs/
 *.log
 debug.*
+
+.vscode/

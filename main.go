@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -23,25 +26,58 @@ const (
 	minimaxModel  = "MiniMax-M2.7"
 )
 
-// Global state for sticky MiniMax routing across requests.
 var (
-	useMinimax     bool   // true = keep routing to MiniMax until mmrelease
-	debugLevel     int    // 0=off, 1=console, 2=console+file dumps
-	thinkStoreBase string // set in initThinkStore, e.g. ~/.claude/mmexec/thinking/
+	debugLevel     int
+	thinkStoreBase string
+	stateBase      string
+	minimaxKey     string
 )
 
 func main() {
+	flag.Parse()
+	switch flag.Arg(0) {
+	case "proxy":
+		runProxy()
+	case "setup":
+		runSetup()
+	default:
+		fmt.Printf("Usage: mmexec {proxy|setup}\n")
+	}
+}
+
+func runSetup() {
+	id := uuid.New().String()
+
+	if err := saveState(id, false); err != nil {
+		log.Fatal(err)
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	settingsPath := filepath.Join(cwd, ".vscode", "settings.json")
+	if err := updateSettings(settingsPath, id); err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("UUID: %s\n", id)
+	fmt.Printf("State: %s\n", stateFilePath(id))
+	fmt.Printf("Settings: %s\n", settingsPath)
+}
+
+func runProxy() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "9099"
 	}
 
-	minimaxKey := os.Getenv("MINIMAX_API_KEY")
+	minimaxKey = os.Getenv("MINIMAX_API_KEY")
 	if minimaxKey == "" {
 		log.Fatal("MINIMAX_API_KEY must be set")
 	}
 
-	log.Printf("mmexec listening on :%s", port)
 	debugLevel = 0
 	if env := os.Getenv("DEBUG"); env == "1" {
 		debugLevel = 1
@@ -52,9 +88,156 @@ func main() {
 		os.MkdirAll("logs", 0755)
 	}
 
-	initThinkStore()
+	initBasePaths()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", handleProxy())
+	log.Printf("mmexec proxy listening on :%s", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+func initBasePaths() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("fatal: cannot resolve user home dir: %v", err)
+	}
+	base := filepath.Join(home, ".claude", "mmexec")
+	if err := os.MkdirAll(base, 0755); err != nil {
+		log.Fatalf("fatal: failed to create base dir %s: %v", base, err)
+	}
+	thinkStoreBase = filepath.Join(base, "thinking")
+	if err := os.MkdirAll(thinkStoreBase, 0755); err != nil {
+		log.Printf("warning: failed to create think store at %s: %v; think store disabled", thinkStoreBase, err)
+		thinkStoreBase = ""
+	} else {
+		log.Printf("thinking hash store: %s", thinkStoreBase)
+	}
+	stateBase = filepath.Join(base, "state")
+	if err := os.MkdirAll(stateBase, 0755); err != nil {
+		log.Printf("warning: failed to create state dir at %s: %v; state disabled", stateBase, err)
+		stateBase = ""
+	} else {
+		log.Printf("state store: %s", stateBase)
+	}
+}
+
+// loadState returns the useMinimax boolean for the given UUID.
+// Returns (false, nil) if the state file does not exist.
+// Returns (false, err) if the file exists but is unreadable.
+func loadState(id string) (bool, error) {
+	if stateBase == "" {
+		return false, nil
+	}
+	path := stateFilePath(id)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var s struct {
+		UseMinimax bool `json:"useMinimax"`
+	}
+	if err := json.Unmarshal(data, &s); err != nil {
+		return false, err
+	}
+	return s.UseMinimax, nil
+}
+
+// saveState persists the useMinimax boolean for the given UUID.
+func saveState(id string, v bool) error {
+	if stateBase == "" {
+		return nil
+	}
+	path := stateFilePath(id)
+	// Ensure parent dir exists.
+	if err := os.MkdirAll(stateBase, 0755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(map[string]bool{"useMinimax": v})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func stateFilePath(id string) string {
+	return filepath.Join(stateBase, id+".json")
+}
+
+// updateSettings adds (or confirms) the ANTHROPIC_BASE_URL entry in .vscode/settings.json.
+// Does not duplicate entries.
+func updateSettings(settingsPath, id string) error {
+	var settings map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return err
+		}
+	}
+	if settings == nil {
+		settings = make(map[string]interface{})
+	}
+
+	envKey := "claudeCode.environmentVariables"
+	envVars, ok := settings[envKey].([]interface{})
+	if !ok {
+		envVars = []interface{}{}
+	}
+
+	// Check for existing entry.
+	for _, ev := range envVars {
+		evm, ok := ev.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, ok := evm["name"].(string); ok && name == "ANTHROPIC_BASE_URL" {
+			// Entry already exists; no update needed.
+			return nil
+		}
+	}
+
+	// Append new entry.
+	url := fmt.Sprintf("http://localhost:9099/%s", id)
+	envVars = append(envVars, map[string]interface{}{
+		"name":  "ANTHROPIC_BASE_URL",
+		"value": url,
+	})
+	settings[envKey] = envVars
+
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	// Ensure .vscode dir exists.
+	vscodeDir := filepath.Dir(settingsPath)
+	if err := os.MkdirAll(vscodeDir, 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(settingsPath, out, 0644)
+}
+
+func handleProxy() http.HandlerFunc {
+	friendlyErrorMsg := "Oh hi! It looks like you're trying to access the mmexec proxy directly. This proxy is meant to be used as a backend for your Claude Code requests, and isn't designed for direct access. Please make sure you already run `mmexec setup` on your project working directory. Thanks!"
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			http.Error(w, friendlyErrorMsg, http.StatusBadRequest)
+			return
+		}
+		parts := strings.Split(path, "/")
+		if len(parts) < 2 || parts[1] != "v1" {
+			http.Error(w, friendlyErrorMsg, http.StatusBadRequest)
+			return
+		}
+		id := parts[0]
+
+		useMinimaxNow, _ := loadState(id)
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "failed to read body", http.StatusBadRequest)
@@ -64,51 +247,62 @@ func main() {
 
 		var raw map[string]json.RawMessage
 		if err := json.Unmarshal(body, &raw); err != nil {
+			// Non-JSON: passthrough to Anthropic directly.
 			forward(w, r, body, anthropicBase, "", r.Header.Get("anthropic-version"))
 			return
 		}
 
-		target, raw := inspect(raw)
-		rewritten, err := json.Marshal(raw)
+		target, rewritten, released := inspect(raw, useMinimaxNow)
+
+		// Persist state changes.
+		if target == "minimax" && !useMinimaxNow {
+			saveState(id, true)
+		} else if released && useMinimaxNow {
+			saveState(id, false)
+		}
+
+		rewrittenBytes, err := json.Marshal(rewritten)
 		if err != nil {
 			http.Error(w, "failed to marshal body", http.StatusInternalServerError)
 			return
 		}
 
-		logRequest(rewritten, target)
-		dumpRequest(rewritten, target)
+		logRequest(rewrittenBytes, target)
+		dumpRequest(rewrittenBytes, target)
+
+		// Strip /<id>/ prefix before forwarding.
+		r.URL.Path = "/" + strings.Join(parts[1:], "/")
 
 		if target == "minimax" {
 			log.Println("→ MiniMax")
-			forward(w, r, rewritten, minimaxBase, minimaxKey, "")
+			forward(w, r, rewrittenBytes, minimaxBase, minimaxKey, "")
 		} else {
 			log.Println("→ Anthropic")
-			reqBody := convertThinkingToUserMessage(rewritten)
+			reqBody := convertThinkingToUserMessage(rewrittenBytes)
 			logRequest(reqBody, "anthropic-stripped")
 			dumpRequest(reqBody, "anthropic-stripped")
 			forward(w, r, reqBody, anthropicBase, "", r.Header.Get("anthropic-version"))
 		}
-	})
-
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	}
 }
 
-// inspect handles routing based on global useMinimax state.
-// - useMinimax == true: always route to MiniMax (sticky)
-// - useMinimax == false: check last message for mmexec/mmrelease triggers
-func inspect(raw map[string]json.RawMessage) (string, map[string]json.RawMessage) {
+// inspect handles routing based on per-UUID useMinimax state.
+// useMinimax == true: always route to MiniMax (sticky)
+// useMinimax == false: check last message for mmexec/mmrelease triggers
+// Returns: target ("minimax"|"anthropic"), rewritten body, released (mmrelease detected)
+func inspect(raw map[string]json.RawMessage, useMinimax bool) (string, map[string]json.RawMessage, bool) {
 	msgsRaw, ok := raw["messages"]
 	if !ok {
-		return "anthropic", raw
+		return "anthropic", raw, false
 	}
 
 	var msgs []json.RawMessage
 	if err := json.Unmarshal(msgsRaw, &msgs); err != nil {
-		return "anthropic", raw
+		return "anthropic", raw, false
 	}
 
 	if len(msgs) == 0 {
-		return "anthropic", raw
+		return "anthropic", raw, false
 	}
 
 	lastIdx := len(msgs) - 1
@@ -116,32 +310,30 @@ func inspect(raw map[string]json.RawMessage) (string, map[string]json.RawMessage
 
 	var last map[string]json.RawMessage
 	if err := json.Unmarshal(lastRaw, &last); err != nil {
-		return "anthropic", raw
+		return "anthropic", raw, false
 	}
 
 	contentRaw, hasContent := last["content"]
 	if !hasContent {
 		if useMinimax {
-			return "minimax", raw
+			return "minimax", raw, false
 		}
-		return "anthropic", raw
+		return "anthropic", raw, false
 	}
 
 	triggered := detectTrigger(contentRaw)
 
 	if triggered == release {
-		useMinimax = false
 		cleanTrigger(last, contentRaw, release)
 		rewrittenMsgs := make([]json.RawMessage, len(msgs))
 		copy(rewrittenMsgs, msgs)
 		rewrittenMsgs[lastIdx], _ = json.Marshal(last)
 		out := deepCopyRaw(raw)
 		out["messages"], _ = json.Marshal(rewrittenMsgs)
-		return "anthropic", out
+		return "anthropic", out, true
 	}
 
 	if triggered == trigger {
-		useMinimax = true
 		cleanTrigger(last, contentRaw, trigger)
 		rewrittenMsgs := make([]json.RawMessage, len(msgs))
 		copy(rewrittenMsgs, msgs)
@@ -149,13 +341,13 @@ func inspect(raw map[string]json.RawMessage) (string, map[string]json.RawMessage
 		out := deepCopyRaw(raw)
 		out["messages"], _ = json.Marshal(rewrittenMsgs)
 		out["model"], _ = json.Marshal(minimaxModel)
-		return "minimax", out
+		return "minimax", out, false
 	}
 
 	if useMinimax {
-		return "minimax", raw
+		return "minimax", raw, false
 	}
-	return "anthropic", raw
+	return "anthropic", raw, false
 }
 
 // detectTrigger checks content for mmexec or mmrelease prefix.
@@ -301,27 +493,7 @@ func truncate(s string, max int) string {
 	return s[:max] + "..."
 }
 
-// initThinkStore creates the thinking hash store directory at ~/.claude/mmexec/thinking/.
-// If the home directory cannot be resolved or the directory cannot be created,
-// thinkStoreBase is set to "" which causes all store operations to silently no-op.
-func initThinkStore() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		log.Printf("warning: cannot resolve user home dir: %v; hash store disabled", err)
-		thinkStoreBase = ""
-		return
-	}
-	thinkStoreBase = filepath.Join(home, ".claude", "mmexec", "thinking")
-	if err := os.MkdirAll(thinkStoreBase, 0755); err != nil {
-		log.Printf("warning: failed to create thinking hash store at %s: %v; hash store disabled", thinkStoreBase, err)
-		thinkStoreBase = ""
-		return
-	}
-	log.Printf("thinking hash store: %s", thinkStoreBase)
-}
-
 // hashThinking returns the SHA256 hex digest of content.
-// Used as the filename in the think store to uniquely identify a thinking block.
 func hashThinking(content string) string {
 	h := sha256.New()
 	h.Write([]byte(content))
@@ -330,9 +502,6 @@ func hashThinking(content string) string {
 
 // processMiniMaxResponse extracts all thinking blocks from a MiniMax API response,
 // computes their SHA256 content hashes, and writes marker files to the think store.
-// Each marker file is an empty file named by the hash — existence marks a block as
-// "pending"; it will be consumed exactly once when the same content appears in an
-// Anthropic request. Errors are logged but do not block response forwarding.
 func processMiniMaxResponse(body []byte) error {
 	if thinkStoreBase == "" {
 		return nil
@@ -345,7 +514,6 @@ func processMiniMaxResponse(body []byte) error {
 		return nil
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		// Non-JSON responses (error pages, HTML, plain text) can't contain thinking blocks; skip.
 		log.Printf("[think-store] non-JSON MiniMax response (%d bytes): %v", len(body), err)
 		return nil
 	}
@@ -362,8 +530,6 @@ func processMiniMaxResponse(body []byte) error {
 			continue
 		}
 
-		// Trim trailing/leading whitespace before hashing to ensure the hash is stable
-		// regardless of how whitespace is normalized when Claude Code persists the block.
 		h := hashThinking(strings.TrimSpace(block.Thinking))
 		path := filepath.Join(thinkStoreBase, h)
 		if err := os.WriteFile(path, nil, 0644); err != nil {
@@ -380,9 +546,6 @@ func processMiniMaxResponse(body []byte) error {
 //   - The thinking block is removed from the content array
 //   - A replacement user block is appended: {"type": "user", "content": "previous assistant thought process: <thinking>"}
 //   - The hash file is deleted (one-time use per thinking block)
-//
-// If the think store is unavailable, returns body unchanged.
-// Only assistant messages are processed; no other fields are modified.
 func convertThinkingToUserMessage(body []byte) []byte {
 	var v interface{}
 	if err := json.Unmarshal(body, &v); err != nil {
@@ -446,11 +609,9 @@ func convertThinkingToUserMessage(body []byte) []byte {
 				continue
 			}
 
-			userContent := trimmed
-
 			userBlock := map[string]interface{}{
 				"type": "text",
-				"text": "previous assistant thought process: " + userContent,
+				"text": "previous assistant thought process: " + trimmed,
 			}
 			toRemove = append(toRemove, i)
 			toAppend = append(toAppend, userBlock)
@@ -462,7 +623,6 @@ func convertThinkingToUserMessage(body []byte) []byte {
 		for i := len(toRemove) - 1; i >= 0; i-- {
 			content = append(content[:toRemove[i]], content[toRemove[i]+1:]...)
 		}
-		// Append replacement user blocks after all removals.
 		msg["content"] = append(content, toAppend...)
 	}
 
@@ -568,8 +728,6 @@ func forward(w http.ResponseWriter, r *http.Request, body []byte, baseURL, apiKe
 	}
 	defer resp.Body.Close()
 
-	// For MiniMax responses: read the full body to extract and store thinking block hashes
-	// before forwarding. Anthropic responses are streamed directly.
 	if baseURL == minimaxBase {
 		respBodyBytes, err := io.ReadAll(resp.Body)
 		if err != nil {

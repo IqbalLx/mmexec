@@ -9,6 +9,7 @@
     <array>
         <!-- Update this to the full path of your mmexec binary -->
         <string>/Users/YOUR_USER/path/to/mmexec/mmexec</string>
+        <string>proxy</string>
     </array>
 
     <key>EnvironmentVariables</key>
