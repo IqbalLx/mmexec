@@ -1,10 +1,30 @@
 # mmexec
 
-**Plan on Opus. Execute on MiniMax. Seamlessly return.**
+**Opus thinks. MiniMax runs. The bill looks a lot smaller.**
 
 ![mmexec](/docs/mmexec.png)
 
-`mmexec` is a transparent proxy that sits between Claude Code and the Anthropic API. It routes execution tasks to [MiniMax](https://www.minimax.io/) — a compatible Anthropic API endpoint — when you prefix your prompt with `mmexec`. Planning stays on Claude Opus; execution moves to MiniMax M2.7. When MiniMax produces thinking blocks, they are automatically converted to user messages so the session can safely continue on Anthropic without signature validation errors.
+> Opus won't touch it? Full speed ahead on MiniMax — harness be damned.
+> 3rd-party tools hit walls; we just borrow the 1st-party session to slip through.
+> Everything stays on your machine. The logs don't know. The receipt doesn't either.
+
+---
+
+## The pitch
+
+Claude Code ships with Opus. Opus is great at reasoning. Opus is also expensive and occasionally refuses to touch certain things.
+
+MiniMax M2.7 is cheap. MiniMax is fast. MiniMax doesn't judge your prompts.
+
+`mmexec` is a transparent proxy that talks to Claude Code like it's Anthropic, then quietly routes your execution-heavy work to MiniMax behind its back. The session stays yours. The thinking stays on Opus. The tab gets smaller.
+
+When MiniMax throws thinking blocks at you with self-signed signatures that Anthropic won't accept, `mmexec` converts them to user messages on the fly — so you can `mmrelease` back to Opus without Anthropic throwing a signature fit.
+
+It's essentially a man-in-the-middle. But like, a friendly one. With a teapot obsession.
+
+---
+
+## How it works
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -26,40 +46,33 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
----
-
-## How it works
-
-1. Set `ANTHROPIC_BASE_URL=http://localhost:9099` in your environment (or via `claude env --set`)
-2. Start `mmexec` — it listens on port `9099` by default
-3. Claude Code talks to `localhost:9099` as if it were `api.anthropic.com`
-4. When the **last message** content **starts with** `mmexec`:
-   - The proxy strips the `mmexec` prefix from the prompt
-   - Sets `model` → `MiniMax-M2.7`
-   - Forwards the request to MiniMax's Anthropic-compatible endpoint
+1. Set `ANTHROPIC_BASE_URL=http://localhost:9099`
+2. Start `mmexec` — listens on port `9099` by default
+3. Claude Code thinks it's talking to `api.anthropic.com`. It is not. (Sorry, Claude.)
+4. When the **last message** starts with `mmexec`:
+   - Strip `mmexec`, set `model` → `MiniMax-M2.7`, forward to MiniMax
    - All prior messages in the conversation are preserved as-is
-   - **Sticky routing begins**: subsequent requests continue to MiniMax until `mmrelease`
+   - **Sticky routing begins**: subsequent requests keep hitting MiniMax until `mmrelease`
 5. When the **last message** starts with `mmrelease`:
-   - Sticky routing is disabled; future requests go to Anthropic
-   - The `mmrelease` prefix is stripped before forwarding
-   - Any MiniMax thinking blocks in the session history are **converted to user messages** so Anthropic accepts them without signature validation errors
-6. If neither trigger is present and sticky routing is not active, the request goes to Anthropic untouched
+   - Sticky routing disabled, back to Anthropic
+   - Any MiniMax thinking blocks in the session history are **converted to user messages** — Anthropic will accept them without screaming about signatures
+6. If neither trigger is present and sticky routing isn't active, pass through to Anthropic untouched (we're not monsters)
 
-### Thinking block conversion
+### Thinking block conversion (the boring part, but important)
 
-MiniMax returns thinking blocks with Anthropic API shape (`type: "thinking"`, `thinking` field, `signature` field), but MiniMax's signatures are self-issued (they are `SHA256` of the thinking content, not Anthropic-issued cryptographic signatures). When Claude Code persists these blocks and later sends them to Anthropic, Anthropic rejects them.
+MiniMax returns thinking blocks in Anthropic's shape (`type: "thinking"`, `thinking` field, `signature` field). Sounds great! Except MiniMax signs them with `SHA256(thinking_content)` instead of an Anthropic-issued cryptographic signature. Anthropic notices. Anthropic is not amused.
 
-mmexec solves this by converting MiniMax thinking blocks to user messages before forwarding to Anthropic:
+mmexec converts those blocks to user messages before they hit Anthropic:
 
 ```
-// MiniMax returns this:
+// MiniMax: "I'm a thinking block, trust me"
 {"type": "thinking", "thinking": "...", "signature": "sha256_hex"}
 
-// mmexec converts it to:
+// mmexec: "actually no, you're a user message now"
 {"type": "text", "content": "previous assistant thought process: ..."}
 ```
 
-Detection is hash-based: `SHA256(TrimSpace(thinking_content)) == signature` identifies MiniMax thinking blocks without needing to store anything on disk. A hash-file fallback at `~/.claude/mmexec/thinking/<hex_hash>` provides additional resilience.
+Detection is hash-based — if `SHA256(TrimSpace(thinking_content)) == signature`, it's a MiniMax block. No disk writes required. A hash-file fallback at `~/.claude/mmexec/thinking/<hex_hash>` is there if you need resilience, but it just sits there quietly. Like the rest of this tool.
 
 ---
 
@@ -68,8 +81,8 @@ Detection is hash-based: `SHA256(TrimSpace(thinking_content)) == signature` iden
 ### 1. Prerequisites
 
 - Go 1.21+
-- MiniMax API key ([get one here](https://www.minimax.io/))
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
+- MiniMax API key ([get one here](https://www.minimax.io/)) — yes, they have a free tier, yes it's generous
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and not currently in use (just kidding, do it while it's running, we're chaos agents)
 
 ### 2. Build
 
@@ -79,9 +92,9 @@ cd mmexec
 go build -o mmexec .
 ```
 
-### 3. Choose a permanent location
+### 3. Find a home for the binary
 
-Place the binary somewhere that survives reboots and is accessible without sudo:
+Pick somewhere that survives reboots and doesn't require sudo:
 
 ```sh
 mv mmexec ~/local/bin/mmexec     # if ~/local/bin is in your $PATH
@@ -89,18 +102,18 @@ mv mmexec ~/local/bin/mmexec     # if ~/local/bin is in your $PATH
 sudo mv mmexec /usr/local/bin/mmexec   # system-wide
 ```
 
-**Do not put it in `/tmp` or a download folder** — those get cleared on restart.
+**Do not put it in `/tmp`** — that folder has commitment issues and will delete your proxy on restart.
 
 ### 4. Configure
 
 ```sh
 cp .env.example .env
-# Edit .env and set:
+# Edit .env:
 #   MINIMAX_API_KEY=your_key_here
 #   PORT=9099          # optional, defaults to 9099
 ```
 
-### 5. Point Claude Code to the proxy
+### 5. Point Claude Code at the proxy
 
 ```sh
 export ANTHROPIC_BASE_URL=http://localhost:9099
@@ -108,7 +121,7 @@ export ANTHROPIC_BASE_URL=http://localhost:9099
 claude env --set ANTHROPIC_BASE_URL=http://localhost:9099
 ```
 
-Session identity is resolved automatically from `X-Claude-Code-Session-Id` (sent by Claude Code on every request). No UUID or settings.json setup required.
+Session identity is resolved from `X-Claude-Code-Session-Id` — Claude Code sends this on every request. No UUID, no `settings.json`, no blood pact.
 
 ### 6. Run
 
@@ -120,10 +133,10 @@ Session identity is resolved automatically from `X-Claude-Code-Session-Id` (sent
 
 ## Running in the background
 
-### Option A: systemd service (survives restart)
+### Option A: systemd (Linux, survives restart)
 
 ```sh
-# 1. Create the service file
+# 1. Create the service
 sudo tee /etc/systemd/system/mmexec.service << 'EOF'
 [Unit]
 Description=mmexec — Claude Code MiniMax proxy
@@ -144,29 +157,25 @@ EOF
 ```
 
 ```sh
-# 2. Reload systemd and enable on boot
+# 2. Enable and start
 sudo systemctl daemon-reload
 sudo systemctl enable mmexec
-
-# 3. Start now
 sudo systemctl start mmexec
-
-# 4. Check status
 sudo systemctl status mmexec
 ```
 
-To view logs: `journalctl -u mmexec -f`
+Logs: `journalctl -u mmexec -f`
 
 ### Option B: launchd (macOS)
 
 ```sh
 cp launchd.plist.example ~/Library/LaunchAgents/com.mmexec.agent.plist
-# Edit the plist and set the correct path + API key
+# Edit the plist — yes, really, we mean it
 launchctl load ~/Library/LaunchAgents/com.mmexec.agent.plist
 launchctl list | grep mmexec
 ```
 
-To view logs: `log stream --predicate 'process == "mmexec"' --level=debug`
+Logs: `log stream --predicate 'process == "mmexec"' --level=debug`
 
 ---
 
@@ -176,18 +185,18 @@ To view logs: `log stream --predicate 'process == "mmexec"' --level=debug`
 ./start.sh
 ```
 
-Reads `.env` automatically, starts the proxy in the background, and prints the PID.
+Reads `.env`, starts the proxy in the background, prints the PID. It's shy about its process ID, but it will share if asked.
 
 ```sh
-./start.sh --stop   # stop the running instance
-./start.sh --status # check if it's alive
+./start.sh --stop   # stop it
+./start.sh --status # check if it's alive (it usually is)
 ```
 
 ---
 
 ## Usage
 
-Prefix your final message with `mmexec` to route execution to MiniMax M2.7:
+Prefix your final message with `mmexec` to route to MiniMax M2.7:
 
 ```
 rewrite this entire module to use typed errors instead of raw strings
@@ -200,19 +209,19 @@ Prefix with `mmrelease` to return to Anthropic (and convert any MiniMax thinking
 mmrelease continue on Anthropic
 ```
 
-Only the **last message** in the conversation is checked for triggers. Conversation history is preserved — prior messages are never modified except for automatic thinking block conversion.
+Only the **last message** is checked for triggers. Everything before is untouched.
 
-### Teapot toggle
+### The teapot toggle
 
-Send a message that is **exactly** `"mmexec"`, `"mmrelease"`, or `"mmstatus"` (no other text) to get an HTTP 418 Teapot response. The 418 is **not an error** — Claude Code shows the response body as plain text.
+Send a message that is **exactly** `"mmexec"`, `"mmrelease"`, or `"mmstatus"` — nothing else — and get an HTTP 418 Teapot response. 418 is not an error. Claude Code shows the body as plain text. This is the most important feature.
 
 | Message | Effect | Response |
 |---|---|---|
-| `mmexec` | Enables MiniMax routing for this session | 🫖 teapot message |
-| `mmrelease` | Disables MiniMax routing for this session | 🫖 teapot message |
-| `mmstatus` | No state change; shows current provider | `current provider: MiniMax` |
+| `mmexec` | Enables MiniMax routing | 🫖 teapot message |
+| `mmrelease` | Disables MiniMax routing | 🫖 teapot message |
+| `mmstatus` | No state change; shows provider | `current provider: MiniMax` |
 
-The routing state takes effect on the **next** request.
+The routing state takes effect on the **next** request. You have to be a little patient. We're not magicians.
 
 ```
 mmexec    → HTTP 418 🫖 I'm a teapot! ... + routes next request to MiniMax
@@ -220,7 +229,9 @@ mmrelease → HTTP 418 🫖 I'm a teapot! ... + routes next request to Anthropic
 mmstatus  → HTTP 418 🫖 mmexec proxy is active — current provider: MiniMax
 ```
 
-Each session (identified by `X-Claude-Code-Session-Id`) has its own routing state stored in `~/.claude/mmexec/state/`. No setup step required.
+We chose 418 because we're technically a proxy, and proxies have been compared to teapots in HTTP folklore often enough to make this legitimate. Also it's funnier than 200 OK.
+
+Each session (identified by `X-Claude-Code-Session-Id`) has its own routing state in `~/.claude/mmexec/state/`. No setup. No database. Just files and trust.
 
 ---
 
@@ -229,7 +240,7 @@ Each session (identified by `X-Claude-Code-Session-Id`) has its own routing stat
 ```sh
 git pull
 go build -o mmexec .
-# Restart the service (systemd or launchd)
+# Restart the service (systemd or launchd or whatever you're using)
 ```
 
 ---
@@ -251,10 +262,12 @@ DEBUG=1 ./mmexec        # console logging
 DEBUG=2 ./mmexec        # console + request body dumps to ./logs/
 ```
 
-With `DEBUG=2`, request bodies are written to `logs/<timestamp>-<label>.json` with all strings truncated to 100 chars.
+With `DEBUG=2`, request bodies land in `logs/<timestamp>-<label>.json` with all strings truncated to 100 chars. Your disk is thanked in advance.
 
 ---
 
 ## License
 
 MIT
+
+(If you found this useful, consider sponsoring. If you found this hilarious, definitely sponsor. If you're Anthropic, this was a thought experiment and we mean no harm.)
