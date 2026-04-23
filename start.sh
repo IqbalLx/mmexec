@@ -86,7 +86,7 @@ start() {
     fi
 
     echo "Starting mmexec..."
-    $BINARY proxy &
+    $BINARY &
     echo $! > "$PID_FILE"
     sleep 1
 

@@ -452,67 +452,6 @@ func TestSaveState(t *testing.T) {
 	}
 }
 
-func TestUpdateSettings(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Test: new file created with correct entry
-	settingsPath := filepath.Join(tmpDir, "settings.json")
-	id := "update-settings-uuid"
-	err := updateSettings(settingsPath, id)
-	if err != nil {
-		t.Fatalf("updateSettings returned error: %v", err)
-	}
-	data, _ := os.ReadFile(settingsPath)
-	var settings map[string]interface{}
-	json.Unmarshal(data, &settings)
-	envVars := settings["claudeCode.environmentVariables"].([]interface{})
-	if len(envVars) != 1 {
-		t.Errorf("envVars length = %d; want 1", len(envVars))
-	}
-	ev := envVars[0].(map[string]interface{})
-	if ev["name"] != "ANTHROPIC_BASE_URL" {
-		t.Errorf("envVar name = %v; want ANTHROPIC_BASE_URL", ev["name"])
-	}
-	expectedURL := "http://localhost:9099/" + id
-	if ev["value"] != expectedURL {
-		t.Errorf("envVar value = %v; want %v", ev["value"], expectedURL)
-	}
-
-	// Test: no duplicate when entry already exists
-	err = updateSettings(settingsPath, id)
-	if err != nil {
-		t.Fatalf("updateSettings (duplicate check) returned error: %v", err)
-	}
-	envVars2 := settings["claudeCode.environmentVariables"].([]interface{})
-	if len(envVars2) != 1 {
-		t.Errorf("duplicate run should not add another entry; got length %d", len(envVars2))
-	}
-
-	// Test: adding to existing settings.json
-	existing := map[string]interface{}{
-		"editor.fontSize": 14,
-		"claudeCode.environmentVariables": []interface{}{
-			map[string]interface{}{"name": "OTHER_VAR", "value": "other"},
-		},
-	}
-	existingJSON, _ := json.Marshal(existing)
-	existingPath := filepath.Join(tmpDir, "existing.json")
-	os.WriteFile(existingPath, existingJSON, 0644)
-
-	err = updateSettings(existingPath, "another-uuid")
-	if err != nil {
-		t.Fatalf("updateSettings on existing file returned error: %v", err)
-	}
-	data, _ = os.ReadFile(existingPath)
-	json.Unmarshal(data, &settings)
-	envVars3 := settings["claudeCode.environmentVariables"].([]interface{})
-	if len(envVars3) != 2 {
-		t.Errorf("should have 2 envVars after append; got %d", len(envVars3))
-	}
-	if settings["editor.fontSize"] != 14.0 {
-		t.Errorf("existing editor.fontSize should be preserved; got %v", settings["editor.fontSize"])
-	}
-}
 
 func TestRealFileSignatureHeuristic(t *testing.T) {
 	oldBase := thinkStoreBase

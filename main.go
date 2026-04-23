@@ -15,13 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 const (
 	trigger       = "mmexec"
 	release       = "mmrelease"
+	statusTrigger = "mmstatus"
 	anthropicBase = "https://api.anthropic.com"
 	minimaxBase   = "https://api.minimax.io/anthropic"
 	minimaxModel  = "MiniMax-M2.7"
@@ -63,36 +62,13 @@ var (
 func main() {
 	flag.Parse()
 	switch flag.Arg(0) {
-	case "proxy":
+	case "proxy", "":
 		runProxy()
-	case "setup":
-		runSetup()
 	default:
-		fmt.Printf("Usage: mmexec {proxy|setup}\n")
+		fmt.Printf("Usage: mmexec [proxy]\n")
 	}
 }
 
-func runSetup() {
-	id := uuid.New().String()
-
-	if err := saveState(id, false); err != nil {
-		log.Fatal(err)
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	settingsPath := filepath.Join(cwd, ".vscode", "settings.json")
-	if err := updateSettings(settingsPath, id); err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("UUID: %s\n", id)
-	fmt.Printf("State: %s\n", stateFilePath(id))
-	fmt.Printf("Settings: %s\n", settingsPath)
-}
 
 func runProxy() {
 	port := os.Getenv("PORT")
@@ -192,64 +168,8 @@ func stateFilePath(id string) string {
 	return filepath.Join(stateBase, id+".json")
 }
 
-// updateSettings adds (or confirms) the ANTHROPIC_BASE_URL entry in .vscode/settings.json.
-// Does not duplicate entries.
-func updateSettings(settingsPath, id string) error {
-	var settings map[string]interface{}
-	data, err := os.ReadFile(settingsPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if len(data) > 0 {
-		if err := json.Unmarshal(data, &settings); err != nil {
-			return err
-		}
-	}
-	if settings == nil {
-		settings = make(map[string]interface{})
-	}
-
-	envKey := "claudeCode.environmentVariables"
-	envVars, ok := settings[envKey].([]interface{})
-	if !ok {
-		envVars = []interface{}{}
-	}
-
-	// Check for existing entry.
-	for _, ev := range envVars {
-		evm, ok := ev.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if name, ok := evm["name"].(string); ok && name == "ANTHROPIC_BASE_URL" {
-			// Entry already exists; no update needed.
-			return nil
-		}
-	}
-
-	// Append new entry.
-	url := fmt.Sprintf("http://localhost:9099/%s", id)
-	envVars = append(envVars, map[string]interface{}{
-		"name":  "ANTHROPIC_BASE_URL",
-		"value": url,
-	})
-	settings[envKey] = envVars
-
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	// Ensure .vscode dir exists.
-	vscodeDir := filepath.Dir(settingsPath)
-	if err := os.MkdirAll(vscodeDir, 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(settingsPath, out, 0644)
-}
-
 func handleProxy() http.HandlerFunc {
-	friendlyErrorMsg := "Oh hi! It looks like you're trying to access the mmexec proxy directly. This proxy is meant to be used as a backend for your Claude Code requests, and isn't designed for direct access. Please make sure you already run `mmexec setup` on your project root directory. Thanks!"
+	friendlyErrorMsg := "Oh hi! This is the mmexec proxy. It should only be accessed by Claude Code. No setup needed!"
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" {
@@ -261,16 +181,13 @@ func handleProxy() http.HandlerFunc {
 			http.Error(w, friendlyErrorMsg, http.StatusBadRequest)
 			return
 		}
-		id := parts[0]
 
 		sessionID := r.Header.Get("X-Claude-Code-Session-Id")
-		if sessionID != "" {
-			log.Printf("[header] X-Claude-Code-Session-Id: %s", sessionID)
-		} else {
-			log.Printf("[header] X-Claude-Code-Session-Id: (not set)")
+		if sessionID == "" {
+			sessionID = parts[0]
 		}
 
-		useMinimaxNow, _ := loadState(id)
+		useMinimaxNow, _ := loadState(sessionID)
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -290,23 +207,31 @@ func handleProxy() http.HandlerFunc {
 
 		// Persist state changes.
 		if target == "minimax" && !useMinimaxNow {
-			saveState(id, true)
+			saveState(sessionID, true)
 		} else if released && useMinimaxNow {
-			saveState(id, false)
+			saveState(sessionID, false)
 		}
 
-		// Detect literal "mmexec" or "mmrelease" (exact word, not prefix).
+		// Detect literal "mmexec", "mmrelease", or "mmstatus" (exact word, not prefix).
 		if dir := detectTeapotTrigger(raw); dir != "" {
 			if dir == "to-minimax" {
-				saveState(id, true)
-			} else {
-				saveState(id, false)
+				saveState(sessionID, true)
+			} else if dir == "to-anthropic" {
+				saveState(sessionID, false)
 			}
 			var msg string
 			if dir == "to-minimax" {
 				msg = toMinimaxMessages[rand.Intn(len(toMinimaxMessages))]
-			} else {
+			} else if dir == "to-anthropic" {
 				msg = toAnthropicMessages[rand.Intn(len(toAnthropicMessages))]
+			} else {
+				// mmstatus — reload state to show current provider
+				useMinimaxNow, _ = loadState(sessionID)
+				if useMinimaxNow {
+					msg = "🫖 mmexec proxy is active — current provider: MiniMax"
+				} else {
+					msg = "🫖 mmexec proxy is active — current provider: Anthropic"
+				}
 			}
 			log.Printf("[teapot] literal %s detected — status 418", dir)
 			w.Header().Set("Content-Type", "text/plain")
@@ -328,10 +253,10 @@ func handleProxy() http.HandlerFunc {
 		r.URL.Path = "/" + strings.Join(parts[1:], "/")
 
 		if target == "minimax" {
-			log.Println("→ MiniMax")
+			log.Printf("→ [minimax] session=%s path=%s", sessionID, r.URL.Path)
 			forward(w, r, rewrittenBytes, minimaxBase, minimaxKey, "")
 		} else {
-			log.Println("→ Anthropic")
+			log.Printf("→ [anthropic] session=%s path=%s", sessionID, r.URL.Path)
 			reqBody := convertThinkingToUserMessage(rewrittenBytes)
 			logRequest(reqBody, "anthropic-stripped")
 			dumpRequest(reqBody, "anthropic-stripped")
@@ -478,6 +403,9 @@ func detectTeapotTrigger(raw map[string]json.RawMessage) string {
 		if contentStr == release {
 			return "to-anthropic"
 		}
+		if contentStr == statusTrigger {
+			return "status"
+		}
 		return ""
 	}
 
@@ -502,6 +430,9 @@ func detectTeapotTrigger(raw map[string]json.RawMessage) string {
 		}
 		if t == release {
 			return "to-anthropic"
+		}
+		if t == statusTrigger {
+			return "status"
 		}
 	}
 	return ""

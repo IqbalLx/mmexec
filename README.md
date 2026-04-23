@@ -2,6 +2,8 @@
 
 **Plan on Opus. Execute on MiniMax. Seamlessly return.**
 
+![mmexec](/docs/mmexec.png)
+
 `mmexec` is a transparent proxy that sits between Claude Code and the Anthropic API. It routes execution tasks to [MiniMax](https://www.minimax.io/) — a compatible Anthropic API endpoint — when you prefix your prompt with `mmexec`. Planning stays on Claude Opus; execution moves to MiniMax M2.7. When MiniMax produces thinking blocks, they are automatically converted to user messages so the session can safely continue on Anthropic without signature validation errors.
 
 ```
@@ -101,12 +103,12 @@ cp .env.example .env
 ### 5. Point Claude Code to the proxy
 
 ```sh
-# Option A: environment variable
 export ANTHROPIC_BASE_URL=http://localhost:9099
-
-# Option B: via Claude Code env config
+# or via Claude Code env config:
 claude env --set ANTHROPIC_BASE_URL=http://localhost:9099
 ```
+
+Session identity is resolved automatically from `X-Claude-Code-Session-Id` (sent by Claude Code on every request). No UUID or settings.json setup required.
 
 ### 6. Run
 
@@ -202,14 +204,23 @@ Only the **last message** in the conversation is checked for triggers. Conversat
 
 ### Teapot toggle
 
-Send a message that is **exactly** `"mmexec"` or `"mmrelease"` (no other text) to get a fun 418 teapot response and toggle routing without running a real request. The routing state still takes effect on the **next** request.
+Send a message that is **exactly** `"mmexec"`, `"mmrelease"`, or `"mmstatus"` (no other text) to get an HTTP 418 Teapot response. The 418 is **not an error** — Claude Code shows the response body as plain text.
+
+| Message | Effect | Response |
+|---|---|---|
+| `mmexec` | Enables MiniMax routing for this session | 🫖 teapot message |
+| `mmrelease` | Disables MiniMax routing for this session | 🫖 teapot message |
+| `mmstatus` | No state change; shows current provider | `current provider: MiniMax` |
+
+The routing state takes effect on the **next** request.
 
 ```
 mmexec    → HTTP 418 🫖 I'm a teapot! ... + routes next request to MiniMax
 mmrelease → HTTP 418 🫖 I'm a teapot! ... + routes next request to Anthropic
+mmstatus  → HTTP 418 🫖 mmexec proxy is active — current provider: MiniMax
 ```
 
-The message is randomly picked from 10 variations each direction.
+Each session (identified by `X-Claude-Code-Session-Id`) has its own routing state stored in `~/.claude/mmexec/state/`. No setup step required.
 
 ---
 

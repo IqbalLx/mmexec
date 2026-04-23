@@ -6,7 +6,7 @@ This file documents knowledge gathered during development of mmexec that is not 
 
 ## Codebase Scope
 
-`main.go` is the **only** production file. All logic lives here. There is no sub-package structure, no `cmd/` directory, no separate package for types. Tests live in `main_test.go` in the same directory.
+`main.go` is the **only** production file. All logic lives here. There is no sub-package structure, no `cmd/` directory, no separate package for types. Tests live in `main_test.go` in the same directory. No `setup` step is required — session state is resolved from the `X-Claude-Code-Session-Id` header per-request.
 
 ---
 
@@ -71,6 +71,7 @@ Failure to do this causes test state to leak across test functions.
 
 - `mmexec` as prefix in last message → sticky routing ON, `model` forced to `MiniMax-M2.7`
 - `mmrelease` as prefix in last message → sticky routing OFF
+- `mmstatus` as exact literal → returns 418 with current provider info (no state change)
 - Sticky routing ON → all subsequent requests go to MiniMax until `mmrelease`
 - Sticky routing OFF + no trigger → Anthropic
 
@@ -78,11 +79,19 @@ The trigger is stripped from the content before forwarding.
 
 ### Literal Trigger (Teapot 418)
 
-When the last message content is **exactly** `"mmexec"` or `"mmrelease"` (no other text), the proxy responds with HTTP 418 and does NOT forward the request upstream. The routing state is still toggled, so the **next** request goes to the new target.
+When the last message content is **exactly** `"mmexec"`, `"mmrelease"`, or `"mmstatus"` (no other text), the proxy responds with HTTP **418 Teapot** and does NOT forward the request upstream.
 
-This is handled by `detectTeapotTrigger` — it checks for exact equality (`==`) instead of `HasPrefix`, and takes priority over the normal `inspect` path. The 418 response uses `Content-Type: text/plain` so Claude Code renders it nicely.
+**This is intentional and not an error.** Claude Code will show the 418 body as the assistant's response. Use it to toggle routing or check status mid-session.
 
-The teapot message is randomly picked from one of two slices (`toMinimaxMessages` / `toAnthropicMessages`), 10 each.
+| Literal | State change | Response body |
+|---|---|---|
+| `mmexec` | Enables MiniMax routing | Random teapot message |
+| `mmrelease` | Disables MiniMax routing | Random teapot message |
+| `mmstatus` | None (stateless read) | Current provider: MiniMax or Anthropic |
+
+The 418 response uses `Content-Type: text/plain` so Claude Code renders it as plain text. `detectTeapotTrigger` checks for exact equality (`==`) instead of `HasPrefix`, and takes priority over the normal `inspect` path.
+
+**No setup required.** Session identity comes from the `X-Claude-Code-Session-Id` header (sent by Claude Code on every request). State is persisted per-session in `~/.claude/mmexec/state/<sessionId>.json`. Backwards compat: falls back to the URL path segment for existing setups.
 
 ---
 
@@ -111,10 +120,11 @@ Look for `[think-store]` logs (hash file writes) and `[think-convert]` logs (con
 | File | Purpose |
 |---|---|
 | `main.go` | All production code |
-| `main_test.go` | Unit tests (15 tests) |
+| `main_test.go` | Unit tests |
 | `tests/multi-turn/` | Real Claude Code session JSON fixtures |
 | `logs/` | `DEBUG=2` request dumps (gitignored) |
 | `~/.claude/mmexec/thinking/` | Hash marker files (created at runtime) |
+| `~/.claude/mmexec/state/` | Per-session routing state files |
 
 ---
 
@@ -124,3 +134,4 @@ Look for `[think-store]` logs (hash file writes) and `[think-convert]` logs (con
 2. **`[think-store] non-JSON` logged**: MiniMax returned SSE, not JSON — this is expected and silently skipped; hash file fallback will handle it
 3. **Test state leakage**: `thinkStoreBase` not restored in `defer` — check every test that sets it
 4. **Forward hanging**: MiniMax path reads full body before writing; if body is large, this can be slow — profile before optimizing
+5. **418 Teapot on every request**: `mmexec` or `mmrelease` is being sent as a literal (exact match) — check if the trigger word is the only content in the last message
