@@ -59,6 +59,13 @@ status() {
     return 1
 }
 
+# Determine binary name (mmexec or mmexec.exe on Windows)
+if [[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" || "$(uname -s)" == "Windows_NT" ]]; then
+    BINARY="./mmexec.exe"
+else
+    BINARY="./mmexec"
+fi
+
 start() {
     if status &>/dev/null; then
         echo "mmexec is already running."
@@ -71,8 +78,15 @@ start() {
         exit 1
     fi
 
+    echo "Building mmexec..."
+    if [[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" || "$(uname -s)" == "Windows_NT" ]]; then
+        go build -o mmexec.exe .
+    else
+        go build -o mmexec .
+    fi
+
     echo "Starting mmexec..."
-    ./mmexec &
+    $BINARY proxy &
     echo $! > "$PID_FILE"
     sleep 1
 
