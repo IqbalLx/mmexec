@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mmexec.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Update this to the full path of your mmexec binary -->
+        <string>/Users/YOUR_USER/path/to/mmexec/mmexec</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Set your MiniMax API key here -->
+        <key>MINIMAX_API_KEY</key>
+        <string>your_minimax_api_key_here</string>
+        <key>PORT</key>
+        <string>9099</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/mmexec.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/mmexec.log</string>
+</dict>
+</plist>

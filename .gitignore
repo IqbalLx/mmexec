@@ -1,0 +1,4 @@
+mmexec
+mmexec.pid
+.env
+*.plist
