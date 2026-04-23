@@ -69,12 +69,20 @@ Failure to do this causes test state to leak across test functions.
 
 ## Routing Logic
 
-- `mmexec` in last message → sticky routing ON, `model` forced to `MiniMax-M2.7`
-- `mmrelease` in last message → sticky routing OFF
+- `mmexec` as prefix in last message → sticky routing ON, `model` forced to `MiniMax-M2.7`
+- `mmrelease` as prefix in last message → sticky routing OFF
 - Sticky routing ON → all subsequent requests go to MiniMax until `mmrelease`
 - Sticky routing OFF + no trigger → Anthropic
 
 The trigger is stripped from the content before forwarding.
+
+### Literal Trigger (Teapot 418)
+
+When the last message content is **exactly** `"mmexec"` or `"mmrelease"` (no other text), the proxy responds with HTTP 418 and does NOT forward the request upstream. The routing state is still toggled, so the **next** request goes to the new target.
+
+This is handled by `detectTeapotTrigger` — it checks for exact equality (`==`) instead of `HasPrefix`, and takes priority over the normal `inspect` path. The 418 response uses `Content-Type: text/plain` so Claude Code renders it nicely.
+
+The teapot message is randomly picked from one of two slices (`toMinimaxMessages` / `toAnthropicMessages`), 10 each.
 
 ---
 
@@ -103,7 +111,7 @@ Look for `[think-store]` logs (hash file writes) and `[think-convert]` logs (con
 | File | Purpose |
 |---|---|
 | `main.go` | All production code |
-| `main_test.go` | Unit tests (12 tests) |
+| `main_test.go` | Unit tests (15 tests) |
 | `tests/multi-turn/` | Real Claude Code session JSON fixtures |
 | `logs/` | `DEBUG=2` request dumps (gitignored) |
 | `~/.claude/mmexec/thinking/` | Hash marker files (created at runtime) |

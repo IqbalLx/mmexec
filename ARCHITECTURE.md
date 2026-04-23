@@ -18,10 +18,14 @@ http.Handler
   ├── io.ReadAll(r.Body)           // read full body (always buffered)
   ├── json.Unmarshal → map[string]json.RawMessage
   ├── inspect(raw)                 // routing + trigger detection
-  │     ├── "mmrelease" → useMinimax = false, clean trigger, return Anthropic
-  │     ├── "mmexec"     → useMinimax = true,  clean trigger, return MiniMax
-  │     ├── useMinimax   → return MiniMax
-  │     └── otherwise    → return Anthropic
+  │     ├── "mmrelease" (prefix)  → useMinimax = false, clean trigger, return Anthropic
+  │     ├── "mmexec"     (prefix) → useMinimax = true,  clean trigger, return MiniMax
+  │     ├── useMinimax            → return MiniMax
+  │     └── otherwise             → return Anthropic
+  │
+  ├── detectTeapotTrigger(raw)     // exact equality check, runs after inspect
+  │     ├── literal "mmexec"      → HTTP 418, saveState(true), return (no forward)
+  │     └── literal "mmrelease"   → HTTP 418, saveState(false), return (no forward)
   │
   ├── routing decision logged
   ├── DEBUG=2? dumpRequest()
@@ -37,11 +41,7 @@ http.Handler
 
 ## Routing State
 
-`useMinimax` is a global boolean that implements **sticky routing**: once `mmexec` is triggered, all subsequent requests route to MiniMax until `mmrelease` is detected.
-
-```go
-var useMinimax bool  // false = Anthropic, true = MiniMax
-```
+`useMinimax` is a per-UUID boolean (persisted to `~/.claude/mmexec/state/<id>.json`) that implements **sticky routing**: once `mmexec` is triggered, all subsequent requests route to MiniMax until `mmrelease` is detected.
 
 ## Thinking Block Conversion
 
@@ -77,6 +77,10 @@ Reads the `messages` array, examines the last message's content for triggers, an
 ### `detectTrigger(contentRaw json.RawMessage) string`
 
 Scans the last message content for `mmexec` or `mmrelease` prefixes. Handles both plain-string content and array-of-blocks content.
+
+### `detectTeapotTrigger(raw map[string]json.RawMessage) string`
+
+Checks if the last message content is **exactly** `"mmexec"` or `"mmrelease"`. Returns `"to-minimax"` or `"to-anthropic"` on match, `""` otherwise. Takes priority over the normal prefix-based `inspect` path — when matched, HTTP 418 is returned and the request is NOT forwarded upstream.
 
 ### `cleanTrigger(last map[string]json.RawMessage, contentRaw json.RawMessage, triggerToStrip string)`
 

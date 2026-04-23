@@ -200,6 +200,17 @@ mmrelease continue on Anthropic
 
 Only the **last message** in the conversation is checked for triggers. Conversation history is preserved — prior messages are never modified except for automatic thinking block conversion.
 
+### Teapot toggle
+
+Send a message that is **exactly** `"mmexec"` or `"mmrelease"` (no other text) to get a fun 418 teapot response and toggle routing without running a real request. The routing state still takes effect on the **next** request.
+
+```
+mmexec    → HTTP 418 🫖 I'm a teapot! ... + routes next request to MiniMax
+mmrelease → HTTP 418 🫖 I'm a teapot! ... + routes next request to Anthropic
+```
+
+The message is randomly picked from 10 variations each direction.
+
 ---
 
 ## Updating mmexec

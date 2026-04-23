@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,6 +32,32 @@ var (
 	thinkStoreBase string
 	stateBase      string
 	minimaxKey     string
+
+	toMinimaxMessages = []string{
+		"🫖 I'm a teapot! Oh hey, you enabled MiniMax — all subsequent requests now go through them.",
+		"🫖 Short and stout. Here's your API key, I'll brew your next request.",
+		"🫖 I'm a teapot! Oh hey, MiniMax is now the main squeeze.",
+		"🫖 Can I get a refill? MiniMax is brewing your next cup of response.",
+		"🫖 I'm a teapot! Oh hey, routing switched to MiniMax — enjoy the blend.",
+		"🫖 Tea time is over. MiniMax is now serving your requests.",
+		"🫖 I'm a teapot! Oh hey, the oracle has spoken: MiniMax it is.",
+		"🫖 This teapot is all yours. MiniMax, incoming!",
+		"🫖 I'm a teapot! Oh hey, MiniMax is the new pour target.",
+		"🫖 Cheers! Brewing your next request with MiniMax.",
+	}
+
+	toAnthropicMessages = []string{
+		"🫖 I'm a teapot! Oh hey, you disabled MiniMax — Anthropic will handle your next request.",
+		"🫖 Short and stout. Pour me another API key, Anthropic here I come.",
+		"🫖 I'm a teapot! Oh hey, we're back to Anthropic — the OG is back.",
+		"🫖 Can I get a refill? Anthropic is handling your next request.",
+		"🫖 I'm a teapot! Oh hey, routing switched to Anthropic — enjoy the blend.",
+		"🫖 Tea time is over. Anthropic is now serving your requests.",
+		"🫖 I'm a teapot! Oh hey, the oracle has spoken: Anthropic it is.",
+		"🫖 This teapot is all yours. Anthropic, incoming!",
+		"🫖 I'm a teapot! Oh hey, Anthropic is the new pour target.",
+		"🫖 Cheers! Brewing your next request with Anthropic.",
+	}
 )
 
 func main() {
@@ -222,7 +249,7 @@ func updateSettings(settingsPath, id string) error {
 }
 
 func handleProxy() http.HandlerFunc {
-	friendlyErrorMsg := "Oh hi! It looks like you're trying to access the mmexec proxy directly. This proxy is meant to be used as a backend for your Claude Code requests, and isn't designed for direct access. Please make sure you already run `mmexec setup` on your project working directory. Thanks!"
+	friendlyErrorMsg := "Oh hi! It looks like you're trying to access the mmexec proxy directly. This proxy is meant to be used as a backend for your Claude Code requests, and isn't designed for direct access. Please make sure you already run `mmexec setup` on your project root directory. Thanks!"
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" {
@@ -235,6 +262,13 @@ func handleProxy() http.HandlerFunc {
 			return
 		}
 		id := parts[0]
+
+		sessionID := r.Header.Get("X-Claude-Code-Session-Id")
+		if sessionID != "" {
+			log.Printf("[header] X-Claude-Code-Session-Id: %s", sessionID)
+		} else {
+			log.Printf("[header] X-Claude-Code-Session-Id: (not set)")
+		}
 
 		useMinimaxNow, _ := loadState(id)
 
@@ -259,6 +293,26 @@ func handleProxy() http.HandlerFunc {
 			saveState(id, true)
 		} else if released && useMinimaxNow {
 			saveState(id, false)
+		}
+
+		// Detect literal "mmexec" or "mmrelease" (exact word, not prefix).
+		if dir := detectTeapotTrigger(raw); dir != "" {
+			if dir == "to-minimax" {
+				saveState(id, true)
+			} else {
+				saveState(id, false)
+			}
+			var msg string
+			if dir == "to-minimax" {
+				msg = toMinimaxMessages[rand.Intn(len(toMinimaxMessages))]
+			} else {
+				msg = toAnthropicMessages[rand.Intn(len(toAnthropicMessages))]
+			}
+			log.Printf("[teapot] literal %s detected — status 418", dir)
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(418)
+			fmt.Fprintf(w, "%s", msg)
+			return
 		}
 
 		rewrittenBytes, err := json.Marshal(rewritten)
@@ -392,6 +446,62 @@ func detectTrigger(contentRaw json.RawMessage) string {
 		}
 		if strings.HasPrefix(text, release) {
 			return release
+		}
+	}
+	return ""
+}
+
+// detectTeapotTrigger returns "to-minimax" or "to-anthropic" when the last
+// message content is exactly the literal trigger word ("mmexec" or "mmrelease").
+// Returns "" if no literal trigger is detected.
+func detectTeapotTrigger(raw map[string]json.RawMessage) string {
+	msgsRaw, ok := raw["messages"]
+	if !ok {
+		return ""
+	}
+	var messages []map[string]json.RawMessage
+	if err := json.Unmarshal(msgsRaw, &messages); err != nil || len(messages) == 0 {
+		return ""
+	}
+	last := messages[len(messages)-1]
+	content, ok := last["content"]
+	if !ok {
+		return ""
+	}
+
+	// Try plain string first.
+	var contentStr string
+	if err := json.Unmarshal(content, &contentStr); err == nil {
+		if contentStr == trigger {
+			return "to-minimax"
+		}
+		if contentStr == release {
+			return "to-anthropic"
+		}
+		return ""
+	}
+
+	// Try array-of-blocks: get last block.
+	var blocks []map[string]json.RawMessage
+	if err := json.Unmarshal(content, &blocks); err != nil || len(blocks) == 0 {
+		return ""
+	}
+	lastBlock := blocks[len(blocks)-1]
+	if blockType, ok := lastBlock["type"]; ok {
+		var t string
+		json.Unmarshal(blockType, &t)
+		if t != "text" {
+			return ""
+		}
+	}
+	if blockText, ok := lastBlock["text"]; ok {
+		var t string
+		json.Unmarshal(blockText, &t)
+		if t == trigger {
+			return "to-minimax"
+		}
+		if t == release {
+			return "to-anthropic"
 		}
 	}
 	return ""
