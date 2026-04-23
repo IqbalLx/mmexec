@@ -77,9 +77,7 @@ func main() {
 		}
 
 		logRequest(rewritten, target)
-		if debugLevel >= 2 {
-			dumpRequest(rewritten, target)
-		}
+		dumpRequest(rewritten, target)
 
 		if target == "minimax" {
 			log.Println("→ MiniMax")
@@ -88,9 +86,7 @@ func main() {
 			log.Println("→ Anthropic")
 			reqBody := convertThinkingToUserMessage(rewritten)
 			logRequest(reqBody, "anthropic-stripped")
-			if debugLevel >= 2 {
-				dumpRequest(reqBody, "anthropic-stripped")
-			}
+			dumpRequest(reqBody, "anthropic-stripped")
 			forward(w, r, reqBody, anthropicBase, "", r.Header.Get("anthropic-version"))
 		}
 	})
@@ -481,6 +477,9 @@ func convertThinkingToUserMessage(body []byte) []byte {
 // dumpRequest writes the full request body to logs/<timestamp>-<label>.json
 // with all strings truncated to 100 chars for readability.
 func dumpRequest(body []byte, label string) {
+	if debugLevel < 2 {
+		return
+	}
 	var v interface{}
 	if err := json.Unmarshal(body, &v); err != nil {
 		log.Printf("[dump] failed to unmarshal %s: %v", label, err)
