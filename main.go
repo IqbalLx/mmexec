@@ -69,7 +69,6 @@ func main() {
 	}
 }
 
-
 func runProxy() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -171,20 +170,10 @@ func stateFilePath(id string) string {
 func handleProxy() http.HandlerFunc {
 	friendlyErrorMsg := "Oh hi! This is the mmexec proxy. It should only be accessed by Claude Code. No setup needed!"
 	return func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			http.Error(w, friendlyErrorMsg, http.StatusBadRequest)
-			return
-		}
-		parts := strings.Split(path, "/")
-		if len(parts) < 2 || parts[1] != "v1" {
-			http.Error(w, friendlyErrorMsg, http.StatusBadRequest)
-			return
-		}
-
 		sessionID := r.Header.Get("X-Claude-Code-Session-Id")
 		if sessionID == "" {
-			sessionID = parts[0]
+			http.Error(w, friendlyErrorMsg, http.StatusBadRequest)
+			return
 		}
 
 		useMinimaxNow, _ := loadState(sessionID)
@@ -248,9 +237,6 @@ func handleProxy() http.HandlerFunc {
 
 		logRequest(rewrittenBytes, target)
 		dumpRequest(rewrittenBytes, target)
-
-		// Strip /<id>/ prefix before forwarding.
-		r.URL.Path = "/" + strings.Join(parts[1:], "/")
 
 		if target == "minimax" {
 			log.Printf("→ [minimax] session=%s path=%s", sessionID, r.URL.Path)
